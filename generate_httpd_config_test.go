@@ -22,7 +22,8 @@ func testGenerateHTTPDConfig(t *testing.T, context spec.G, it spec.S) {
 
 		generateHTTPDConfig httpd.GenerateHTTPDConfig
 
-		bindingResolver *fakes.BindingResolver
+		bindingResolver     *fakes.BindingResolver
+		vcapBindingResolver *fakes.BindingResolver
 
 		buffer *bytes.Buffer
 	)
@@ -31,8 +32,9 @@ func testGenerateHTTPDConfig(t *testing.T, context spec.G, it spec.S) {
 		buffer = bytes.NewBuffer(nil)
 
 		bindingResolver = &fakes.BindingResolver{}
+		vcapBindingResolver = &fakes.BindingResolver{}
 
-		generateHTTPDConfig = httpd.NewGenerateHTTPDConfig(bindingResolver, scribe.NewEmitter(buffer))
+		generateHTTPDConfig = httpd.NewGenerateHTTPDConfig(bindingResolver, vcapBindingResolver, scribe.NewEmitter(buffer))
 	})
 
 	context("Generate", func() {
@@ -363,7 +365,7 @@ CustomLog /proc/self/fd/1 common
 				}
 			})
 
-			it("creates a config with that requires basic auth", func() {
+			it("creates a config that requires basic auth", func() {
 				err := generateHTTPDConfig.Generate(workingDir, "platform", httpd.BuildEnvironment{})
 				Expect(err).NotTo(HaveOccurred())
 
@@ -432,6 +434,188 @@ CustomLog /proc/self/fd/1 common
 			})
 		})
 
+		context("when the htpasswd binding is provided via VCAP_SERVICES", func() {
+			it.Before(func() {
+				vcapBindingResolver.ResolveCall.Returns.BindingSlice = []servicebindings.Binding{
+					{
+						Name: "first",
+						Type: "htpasswd",
+						Path: "some-binding-path-vcap",
+						Entries: map[string]*servicebindings.Entry{
+							".htpasswd": servicebindings.NewEntry("some-path"),
+						},
+					},
+				}
+			})
+
+			it("creates a config with that requires basic auth", func() {
+				err := generateHTTPDConfig.Generate(workingDir, "platform", httpd.BuildEnvironment{})
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(vcapBindingResolver.ResolveCall.Receives.Typ).To(Equal("htpasswd"))
+				Expect(vcapBindingResolver.ResolveCall.Receives.Provider).To(Equal(""))
+				Expect(vcapBindingResolver.ResolveCall.Receives.PlatformDir).To(Equal(workingDir))
+
+				Expect(buffer.String()).To(ContainSubstring("Adds configuration that configured basic authentication from service binding"))
+
+				contents, err := os.ReadFile(filepath.Join(workingDir, "httpd.conf"))
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(string(contents)).To(Equal(`ServerRoot "${SERVER_ROOT}"
+
+ServerName "0.0.0.0"
+
+LoadModule mpm_event_module modules/mod_mpm_event.so
+LoadModule log_config_module modules/mod_log_config.so
+LoadModule mime_module modules/mod_mime.so
+LoadModule dir_module modules/mod_dir.so
+LoadModule authz_core_module modules/mod_authz_core.so
+LoadModule unixd_module modules/mod_unixd.so
+LoadModule authn_core_module modules/mod_authn_core.so
+LoadModule authn_file_module modules/mod_authn_file.so
+LoadModule authz_host_module modules/mod_authz_host.so
+LoadModule authz_user_module modules/mod_authz_user.so
+LoadModule access_compat_module modules/mod_access_compat.so
+LoadModule auth_basic_module modules/mod_auth_basic.so
+
+TypesConfig conf/mime.types
+
+PidFile /tmp/httpd.pid
+
+User nobody
+
+Listen "${PORT}"
+
+DocumentRoot "${APP_ROOT}/public"
+
+DirectoryIndex index.html
+
+ErrorLog /proc/self/fd/2
+
+LogFormat "%h %l %u %t \"%r\" %>s %b" common
+CustomLog /proc/self/fd/1 common
+
+<Directory />
+  AllowOverride None
+  Require all denied
+</Directory>
+
+<Directory "${APP_ROOT}/public">
+  Require valid-user
+
+  AuthType Basic
+  AuthName "Authentication Required"
+  AuthUserFile "some-binding-path-vcap/.htpasswd"
+
+  Order allow,deny
+  Allow from all
+</Directory>
+
+<Files ".ht*">
+  Require all denied
+</Files>`), string(contents))
+			})
+		})
+
+		context("when the binding is present in both formats", func() {
+			it.Before(func() {
+				bindingResolver.ResolveCall.Returns.BindingSlice = []servicebindings.Binding{
+					{
+						Name: "first",
+						Type: "htpasswd",
+						Path: "some-binding-path",
+						Entries: map[string]*servicebindings.Entry{
+							".htpasswd": servicebindings.NewEntry("some-path"),
+						},
+					},
+				}
+
+				vcapBindingResolver.ResolveCall.Returns.BindingSlice = []servicebindings.Binding{
+					{
+						Name: "second",
+						Type: "htpasswd",
+						Path: "some-binding-path-vcap",
+						Entries: map[string]*servicebindings.Entry{
+							".htpasswd": servicebindings.NewEntry("some-path"),
+						},
+					},
+				}
+			})
+
+			it("prefers the Kubernetes binding format", func() {
+				err := generateHTTPDConfig.Generate(workingDir, "platform", httpd.BuildEnvironment{})
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(bindingResolver.ResolveCall.Receives.Typ).To(Equal("htpasswd"))
+				Expect(bindingResolver.ResolveCall.Receives.Provider).To(Equal(""))
+				Expect(bindingResolver.ResolveCall.Receives.PlatformDir).To(Equal("platform"))
+
+				Expect(vcapBindingResolver.ResolveCall.Receives.Typ).To(Equal(""))
+				Expect(vcapBindingResolver.ResolveCall.Receives.Provider).To(Equal(""))
+				Expect(vcapBindingResolver.ResolveCall.Receives.PlatformDir).To(Equal(""))
+
+				Expect(buffer.String()).To(ContainSubstring("Adds configuration that configured basic authentication from service binding"))
+
+				contents, err := os.ReadFile(filepath.Join(workingDir, "httpd.conf"))
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(string(contents)).To(Equal(`ServerRoot "${SERVER_ROOT}"
+
+ServerName "0.0.0.0"
+
+LoadModule mpm_event_module modules/mod_mpm_event.so
+LoadModule log_config_module modules/mod_log_config.so
+LoadModule mime_module modules/mod_mime.so
+LoadModule dir_module modules/mod_dir.so
+LoadModule authz_core_module modules/mod_authz_core.so
+LoadModule unixd_module modules/mod_unixd.so
+LoadModule authn_core_module modules/mod_authn_core.so
+LoadModule authn_file_module modules/mod_authn_file.so
+LoadModule authz_host_module modules/mod_authz_host.so
+LoadModule authz_user_module modules/mod_authz_user.so
+LoadModule access_compat_module modules/mod_access_compat.so
+LoadModule auth_basic_module modules/mod_auth_basic.so
+
+TypesConfig conf/mime.types
+
+PidFile /tmp/httpd.pid
+
+User nobody
+
+Listen "${PORT}"
+
+DocumentRoot "${APP_ROOT}/public"
+
+DirectoryIndex index.html
+
+ErrorLog /proc/self/fd/2
+
+LogFormat "%h %l %u %t \"%r\" %>s %b" common
+CustomLog /proc/self/fd/1 common
+
+<Directory />
+  AllowOverride None
+  Require all denied
+</Directory>
+
+<Directory "${APP_ROOT}/public">
+  Require valid-user
+
+  AuthType Basic
+  AuthName "Authentication Required"
+  AuthUserFile "some-binding-path/.htpasswd"
+
+  Order allow,deny
+  Allow from all
+</Directory>
+
+<Files ".ht*">
+  Require all denied
+</Files>`), string(contents))
+			})
+
+		})
+
 		context("failure cases", func() {
 			context("when the config file cannot be created", func() {
 				it.Before(func() {
@@ -448,59 +632,119 @@ CustomLog /proc/self/fd/1 common
 				})
 			})
 
-			context("when the binding resolver fails", func() {
-				it.Before(func() {
-					bindingResolver.ResolveCall.Returns.Error = errors.New("failed to resolve binding")
+			context("standard bindingResolver", func() {
+				context("when the binding resolver fails", func() {
+					it.Before(func() {
+						bindingResolver.ResolveCall.Returns.Error = errors.New("failed to resolve binding")
+					})
+					it("returns an error", func() {
+						err := generateHTTPDConfig.Generate(workingDir, "platform", httpd.BuildEnvironment{})
+						Expect(err).To(MatchError("failed to resolve binding"))
+					})
 				})
-				it("returns an error", func() {
-					err := generateHTTPDConfig.Generate(workingDir, "platform", httpd.BuildEnvironment{})
-					Expect(err).To(MatchError("failed to resolve binding"))
+
+				context("when more than one binding is found", func() {
+					it.Before(func() {
+						bindingResolver.ResolveCall.Returns.BindingSlice = []servicebindings.Binding{
+							{
+								Name: "first",
+								Type: "htpasswd",
+								Path: "some-binding-path",
+								Entries: map[string]*servicebindings.Entry{
+									".htpasswd": servicebindings.NewEntry("some-path"),
+								},
+							},
+							{
+								Name: "second",
+								Type: "htpasswd",
+								Path: "some-binding-path",
+								Entries: map[string]*servicebindings.Entry{
+									".htpasswd": servicebindings.NewEntry("some-path"),
+								},
+							},
+						}
+					})
+					it("returns an error", func() {
+						err := generateHTTPDConfig.Generate(workingDir, "platform", httpd.BuildEnvironment{})
+						Expect(err).To(MatchError("failed: binding resolver found more than one binding of type 'htpasswd'"))
+					})
+				})
+
+				context("when the binding is missing the required entry", func() {
+					it.Before(func() {
+						bindingResolver.ResolveCall.Returns.BindingSlice = []servicebindings.Binding{
+							{
+								Name: "first",
+								Type: "htpasswd",
+								Path: "some-binding-path",
+								Entries: map[string]*servicebindings.Entry{
+									"wrong-entry": servicebindings.NewEntry("some-path"),
+								},
+							},
+						}
+					})
+					it("returns an error", func() {
+						err := generateHTTPDConfig.Generate(workingDir, "platform", httpd.BuildEnvironment{})
+						Expect(err).To(MatchError("failed: binding of type 'htpasswd' does not contain required entry '.htpasswd'"))
+					})
 				})
 			})
 
-			context("when more than one binding is found", func() {
-				it.Before(func() {
-					bindingResolver.ResolveCall.Returns.BindingSlice = []servicebindings.Binding{
-						{
-							Name: "first",
-							Type: "htpasswd",
-							Path: "some-binding-path",
-							Entries: map[string]*servicebindings.Entry{
-								".htpasswd": servicebindings.NewEntry("some-path"),
-							},
-						},
-						{
-							Name: "second",
-							Type: "htpasswd",
-							Path: "some-binding-path",
-							Entries: map[string]*servicebindings.Entry{
-								".htpasswd": servicebindings.NewEntry("some-path"),
-							},
-						},
-					}
+			context("vcapBindingResolver", func() {
+				context("when the binding resolver fails", func() {
+					it.Before(func() {
+						vcapBindingResolver.ResolveCall.Returns.Error = errors.New("failed to resolve binding")
+					})
+					it("returns an error", func() {
+						err := generateHTTPDConfig.Generate(workingDir, "platform", httpd.BuildEnvironment{})
+						Expect(err).To(MatchError("failed to resolve binding"))
+					})
 				})
-				it("returns an error", func() {
-					err := generateHTTPDConfig.Generate(workingDir, "platform", httpd.BuildEnvironment{})
-					Expect(err).To(MatchError("failed: binding resolver found more than one binding of type 'htpasswd'"))
-				})
-			})
 
-			context("when the binding is missing the required entry", func() {
-				it.Before(func() {
-					bindingResolver.ResolveCall.Returns.BindingSlice = []servicebindings.Binding{
-						{
-							Name: "first",
-							Type: "htpasswd",
-							Path: "some-binding-path",
-							Entries: map[string]*servicebindings.Entry{
-								"wrong-entry": servicebindings.NewEntry("some-path"),
+				context("when more than one binding is found", func() {
+					it.Before(func() {
+						vcapBindingResolver.ResolveCall.Returns.BindingSlice = []servicebindings.Binding{
+							{
+								Name: "first",
+								Type: "htpasswd",
+								Path: "some-binding-path",
+								Entries: map[string]*servicebindings.Entry{
+									".htpasswd": servicebindings.NewEntry("some-path"),
+								},
 							},
-						},
-					}
+							{
+								Name: "second",
+								Type: "htpasswd",
+								Path: "some-binding-path",
+								Entries: map[string]*servicebindings.Entry{
+									".htpasswd": servicebindings.NewEntry("some-path"),
+								},
+							},
+						}
+					})
+					it("returns an error", func() {
+						err := generateHTTPDConfig.Generate(workingDir, "platform", httpd.BuildEnvironment{})
+						Expect(err).To(MatchError("failed: binding resolver found more than one binding of type 'htpasswd'"))
+					})
 				})
-				it("returns an error", func() {
-					err := generateHTTPDConfig.Generate(workingDir, "platform", httpd.BuildEnvironment{})
-					Expect(err).To(MatchError("failed: binding of type 'htpasswd' does not contain required entry '.htpasswd'"))
+
+				context("when the binding is missing the required entry", func() {
+					it.Before(func() {
+						vcapBindingResolver.ResolveCall.Returns.BindingSlice = []servicebindings.Binding{
+							{
+								Name: "first",
+								Type: "htpasswd",
+								Path: "some-binding-path",
+								Entries: map[string]*servicebindings.Entry{
+									"wrong-entry": servicebindings.NewEntry("some-path"),
+								},
+							},
+						}
+					})
+					it("returns an error", func() {
+						err := generateHTTPDConfig.Generate(workingDir, "platform", httpd.BuildEnvironment{})
+						Expect(err).To(MatchError("failed: binding of type 'htpasswd' does not contain required entry '.htpasswd'"))
+					})
 				})
 			})
 		})

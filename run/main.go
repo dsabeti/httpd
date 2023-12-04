@@ -29,7 +29,7 @@ func main() {
 	logEmitter := scribe.NewEmitter(os.Stdout).WithLevel(os.Getenv("BP_LOG_LEVEL"))
 	versionParser := httpd.NewVersionParser()
 	entryResolver := draft.NewPlanner()
-	generateHTTPDConfig := httpd.NewGenerateHTTPDConfig(servicebindings.NewResolver(), logEmitter)
+	generateHTTPDConfig := httpd.NewGenerateHTTPDConfig(servicebindings.NewResolver(), &httpd.VcapBindingResolver{}, logEmitter)
 
 	var buildEnvironment httpd.BuildEnvironment
 	err := env.Parse(&buildEnvironment)

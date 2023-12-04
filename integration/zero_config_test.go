@@ -255,4 +255,83 @@ func testZeroConfig(t *testing.T, context spec.G, it spec.S) {
 			Expect(string(contents)).To(ContainSubstring("Hello World!"))
 		})
 	})
+
+	context("app with VCAP_SERVICES binding", func() {
+		it.Before(func() {
+			var err error
+			source, err = occam.Source(filepath.Join("testdata", "zero_config"))
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		it("serves up a static site that requires basic auth", func() {
+			var (
+				err  error
+				logs fmt.Stringer
+			)
+			image, logs, err = pack.Build.
+				WithPullPolicy("never").
+				WithBuildpacks(httpdBuildpack).
+				WithEnv(map[string]string{
+					"BP_WEB_SERVER": "httpd",
+					"VCAP_SERVICES": `{
+						"htpasswd": [
+							{
+								"label": "htpasswd", 
+								"name":"htpasswd",
+								"binding_guid": "deadbeef",
+								"credentials": {
+									".htpasswd": "user:$apr1$4A7us6ta$b.nzSqqXF2vkP8YbfOaH61"
+								}
+							}
+						]
+					}`,
+				}).
+				Execute(name, filepath.Join(source))
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(logs).To(ContainLines(
+				"  Generating httpd.conf",
+				"    Adds configuration that configured basic authentication from service binding",
+				"",
+			))
+
+			container, err = docker.Container.Run.
+				WithEnv(map[string]string{
+					"PORT": "8080",
+					"VCAP_SERVICES": `{
+						"htpasswd": [
+							{
+								"label": "htpasswd", 
+								"name":"htpasswd",
+								"binding_guid": "deadbeef",
+								"credentials": {
+									".htpasswd": "user:$apr1$4A7us6ta$b.nzSqqXF2vkP8YbfOaH61"
+								}
+							}
+						]
+					}`,
+				}).
+				WithPublish("8080").
+				WithPublishAll().
+				Execute(image.ID)
+			Expect(err).NotTo(HaveOccurred())
+
+			response, err := http.Get(fmt.Sprintf("http://localhost:%s", container.HostPort("8080")))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(response.StatusCode).To(Equal(http.StatusUnauthorized))
+
+			req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://localhost:%s", container.HostPort("8080")), http.NoBody)
+			Expect(err).NotTo(HaveOccurred())
+
+			req.SetBasicAuth("user", "password")
+
+			response, err = http.DefaultClient.Do(req)
+			Expect(err).NotTo(HaveOccurred())
+
+			contents, err := io.ReadAll(response.Body)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(contents)).To(ContainSubstring("Hello World!"))
+		})
+
+	})
 }

@@ -16,14 +16,16 @@ type BindingResolver interface {
 }
 
 type GenerateHTTPDConfig struct {
-	bindingResolver BindingResolver
-	logger          scribe.Emitter
+	bindingResolver     BindingResolver
+	vcapBindingResolver BindingResolver
+	logger              scribe.Emitter
 }
 
-func NewGenerateHTTPDConfig(bindingResolver BindingResolver, logger scribe.Emitter) GenerateHTTPDConfig {
+func NewGenerateHTTPDConfig(bindingResolver BindingResolver, vcapBindingResolver BindingResolver, logger scribe.Emitter) GenerateHTTPDConfig {
 	return GenerateHTTPDConfig{
-		bindingResolver: bindingResolver,
-		logger:          logger,
+		bindingResolver:     bindingResolver,
+		vcapBindingResolver: vcapBindingResolver,
+		logger:              logger,
 	}
 }
 
@@ -59,20 +61,19 @@ func (g GenerateHTTPDConfig) Generate(workingDir, platformPath string, buildEnvi
 		g.logger.Subprocess("Adds configuration that forces https redirect")
 	}
 
-	bindings, err := g.bindingResolver.Resolve("htpasswd", "", platformPath)
+	bindings, err := extractHtpasswdBinding(g.bindingResolver, platformPath)
 	if err != nil {
 		return err
 	}
 
-	if len(bindings) > 1 {
-		return fmt.Errorf("failed: binding resolver found more than one binding of type 'htpasswd'")
+	if len(bindings) != 1 {
+		bindings, err = extractHtpasswdBinding(g.vcapBindingResolver, workingDir)
+		if err != nil {
+			return err
+		}
 	}
 
 	if len(bindings) == 1 {
-		if _, ok := bindings[0].Entries[".htpasswd"]; !ok {
-			return fmt.Errorf("failed: binding of type 'htpasswd' does not contain required entry '.htpasswd'")
-		}
-
 		g.logger.Subprocess("Adds configuration that configured basic authentication from service binding")
 
 		buildEnvironment.BasicAuthFile = filepath.Join(bindings[0].Path, ".htpasswd")
@@ -90,4 +91,23 @@ func (g GenerateHTTPDConfig) Generate(workingDir, platformPath string, buildEnvi
 		return err
 	}
 	return nil
+}
+
+func extractHtpasswdBinding(bindingResolver BindingResolver, auxiliaryDir string) ([]servicebindings.Binding, error) {
+	bindings, err := bindingResolver.Resolve("htpasswd", "", auxiliaryDir)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(bindings) > 1 {
+		return nil, fmt.Errorf("failed: binding resolver found more than one binding of type 'htpasswd'")
+	}
+
+	if len(bindings) == 1 {
+		if _, ok := bindings[0].Entries[".htpasswd"]; !ok {
+			return nil, fmt.Errorf("failed: binding of type 'htpasswd' does not contain required entry '.htpasswd'")
+		}
+	}
+
+	return bindings, nil
 }

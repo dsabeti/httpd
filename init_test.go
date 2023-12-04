@@ -13,5 +13,6 @@ func TestUnitHTTPD(t *testing.T) {
 	suite("Detect", testDetect)
 	suite("GenerateHTTPDConfig", testGenerateHTTPDConfig)
 	suite("VersionParser", testVersionParser)
+	suite("VcapBindingResolver", testVcapBindingResolver)
 	suite.Run(t)
 }
